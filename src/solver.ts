@@ -870,22 +870,52 @@ class CapacityDinic {
     return this.level[t] !== -1;
   }
 
-  private dfs(u: number, t: number, pushed: number): number {
-    if (u === t || pushed === 0) return pushed;
-    while (this.it[u] !== -1) {
-      const a = this.it[u];
-      const v = this.to[a];
-      if (this.cap[a] > 0 && this.level[v] === this.level[u] + 1) {
-        const flow = this.dfs(v, t, Math.min(pushed, this.cap[a]));
-        if (flow > 0) {
-          this.cap[a] -= flow;
-          this.cap[a ^ 1] += flow;
-          return flow;
+  /**
+   * 在层次图上寻找一条 s→t 增广路并推流，返回本次流量（无可增广路时为 0）。
+   *
+   * 迭代实现：用显式弧栈代替递归调用栈，扫描顺序、当前弧指针推进规则与
+   * 「找到即沿路径推瓶颈流量」的语义和递归版完全一致（同一网络上的增广路
+   * 序列、残量更新与最小割结果逐次相同），但增广路长度不再受调用栈深度
+   * 限制——长链管网（路径上万条弧）不会再触发 RangeError。
+   */
+  private dfs(s: number, t: number, pushed: number): number {
+    if (s === t || pushed === 0) return pushed;
+    // path 为当前 s→…→u 路径上的弧下标栈（显式栈，代替递归调用栈）
+    const path: number[] = [];
+    let u = s;
+    while (true) {
+      // 从当前弧指针起扫描 u 的出弧，跳过不可增广的弧（指针永久推进）
+      let arc = -1;
+      while (this.it[u] !== -1) {
+        const a = this.it[u];
+        if (this.cap[a] > 0 && this.level[this.to[a]] === this.level[u] + 1) {
+          arc = a;
+          break;
         }
+        this.it[u] = this.next[a];
       }
-      this.it[u] = this.next[a];
+      if (arc === -1) {
+        // u 的出弧已尽：沿路径回退一格（等价于递归版子调用返回 0 后推进父节点弧指针）
+        if (path.length === 0) return 0;
+        const last = path.pop()!;
+        u = this.from[last];
+        this.it[u] = this.next[last];
+        continue;
+      }
+      path.push(arc);
+      u = this.to[arc];
+      if (u !== t) continue;
+      // 到达汇点：路径瓶颈即本次推流量，沿路径正/反弧成对更新残量
+      let flow = pushed;
+      for (const a of path) {
+        if (this.cap[a] < flow) flow = this.cap[a];
+      }
+      for (const a of path) {
+        this.cap[a] -= flow;
+        this.cap[a ^ 1] += flow;
+      }
+      return flow;
     }
-    return 0;
   }
 
   maxFlow(s: number, t: number): number {

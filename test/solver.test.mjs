@@ -631,6 +631,82 @@ check('优先配水不修改输入网络与数值', JSON.stringify(network) === 
 const pe6 = prio(['S1'], ['B'], ['B', 'B'], { S1: 1 }, { B: 1 });
 check('重复重点出口去重处理', pe6.status === 'ok' && pe6.priorityOutletCount === 1);
 
+// ============ 长链管网与残量改派（增广搜索不依赖调用栈深度） ============
+console.log('长链管网与残量改派：');
+
+// 14000 节点单链、首端供给 1、末端需求 1：增广路径长达一万余条弧，
+// 共用容量流求解器的增广搜索不得依赖调用栈深度（曾因递归实现抛出
+// RangeError，页面无法给出获配量），末端获配量应为 1
+const LONG_CHAIN_NODES = 14000;
+const longChainNet = {
+  nodes: Array.from({ length: LONG_CHAIN_NODES }, (_, i) => `N${i}`),
+  pipes: Array.from({ length: LONG_CHAIN_NODES - 1 }, (_, i) => ({
+    id: `P${i}`, from: `N${i}`, to: `N${i + 1}`,
+  })),
+  valvedPipes: [],
+};
+const lc1 = solver.verifyCapacity(longChainNet, {
+  supplies: ['N0'],
+  outlets: [`N${LONG_CHAIN_NODES - 1}`],
+  supplyCaps: { N0: 1 },
+  outletDemands: { [`N${LONG_CHAIN_NODES - 1}`]: 1 },
+});
+check('长链核验返回 ok（不抛 RangeError）', lc1.status === 'ok');
+check('长链首端供给 1、末端需求 1：末端获配 1',
+  lc1.status === 'ok' && lc1.totalAllocated === 1 &&
+  lc1.rows[0].allocated === 1 && lc1.rows[0].fullySupplied);
+check('长链最小割为首端供给上限（割容量合计等于总获配）',
+  lc1.status === 'ok' && lc1.cutCapacity === 1 && lc1.cutItems.length === 1 &&
+  lc1.cutItems[0].kind === 'supply' && lc1.cutItems[0].id === 'N0');
+
+// 复用同一求解器的重点优先配水在长链上同样可用：两级目标都沿长链增广，
+// 首端供给 1 时末端重点出口获配 1、链中部普通出口获配 0
+const lcMid = `N${LONG_CHAIN_NODES / 2}`;
+const lcEnd = `N${LONG_CHAIN_NODES - 1}`;
+const lc2 = solver.verifyPriorityCapacity(longChainNet, {
+  supplies: ['N0'],
+  outlets: [lcMid, lcEnd],
+  supplyCaps: { N0: 1 },
+  outletDemands: { [lcMid]: 1, [lcEnd]: 1 },
+  priorityOutlets: [lcEnd],
+});
+check('长链重点优先配水返回 ok', lc2.status === 'ok');
+check('长链上末端重点获配 1、中部普通出口获配 0',
+  lc2.status === 'ok' && lc2.priorityAllocated === 1 && lc2.totalAllocated === 1 &&
+  prioRow(lc2, lcEnd).allocated === 1 && prioRow(lc2, lcMid).allocated === 0);
+
+// 需要残量改派的小图：管段顺序使首条增广路 S→X1→Y2 占住 Y2 的需求弧，
+// 第二条增广路必须穿过共享管段 X1—Y2 的反向残量弧（S→X2→Y2→X1→Y1）
+// 才能达到最大流 2；不允许残量回退的实现只能得到 1
+const rerouteOnceNet = {
+  nodes: ['S', 'X1', 'X2', 'Y1', 'Y2'],
+  pipes: [
+    { id: 'SX1', from: 'S', to: 'X1' },
+    { id: 'SX2', from: 'S', to: 'X2' },
+    { id: 'X1Y1', from: 'X1', to: 'Y1' },
+    { id: 'X1Y2', from: 'X1', to: 'Y2' },
+    { id: 'X2Y2', from: 'X2', to: 'Y2' },
+  ],
+  valvedPipes: [],
+};
+const rr1 = solver.verifyCapacity(rerouteOnceNet, {
+  supplies: ['S'], outlets: ['Y1', 'Y2'],
+  supplyCaps: { S: 2 }, outletDemands: { Y1: 1, Y2: 1 },
+});
+check('残量改派小图单次核验达最大流 2', rr1.status === 'ok' && rr1.totalAllocated === 2);
+check('残量改派后两出口均足额', rr1.status === 'ok' &&
+  rr1.rows.every((x) => x.allocated === 1 && x.fullySupplied));
+check('残量改派小图最小割为供给上限（割容量合计 2）', rr1.status === 'ok' &&
+  rr1.cutCapacity === 2 && rr1.cutItems.length === 1 &&
+  rr1.cutItems[0].kind === 'supply' && rr1.cutItems[0].id === 'S');
+const rr2 = solver.verifyPriorityCapacity(rerouteOnceNet, {
+  supplies: ['S'], outlets: ['Y1', 'Y2'], priorityOutlets: ['Y2'],
+  supplyCaps: { S: 2 }, outletDemands: { Y1: 1, Y2: 1 },
+});
+check('残量改派小图重点配水总获配同为 2', rr2.status === 'ok' &&
+  rr2.priorityAllocated === 1 && rr2.totalAllocated === 2 &&
+  rr2.rows.every((x) => x.allocated === 1));
+
 // ============ 管段增容建议 ============
 console.log('管段增容建议：');
 
