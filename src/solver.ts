@@ -870,22 +870,49 @@ class CapacityDinic {
     return this.level[t] !== -1;
   }
 
-  private dfs(u: number, t: number, pushed: number): number {
-    if (u === t || pushed === 0) return pushed;
-    while (this.it[u] !== -1) {
-      const a = this.it[u];
-      const v = this.to[a];
-      if (this.cap[a] > 0 && this.level[v] === this.level[u] + 1) {
-        const flow = this.dfs(v, t, Math.min(pushed, this.cap[a]));
-        if (flow > 0) {
-          this.cap[a] -= flow;
-          this.cap[a ^ 1] += flow;
-          return flow;
+  /**
+   * 单路径增广（迭代实现，不依赖调用栈深度）。
+   *
+   * 与递归实现语义完全一致：沿层次图（残量 > 0 且 level 严格 +1 的弧）从 s 下行至 t，
+   * 沿途用显式栈 path 记录路径弧；下行受阻时回溯并推进当前弧指针（当前弧优化），
+   * 退回源点即本相位无可增广路。推流时取入口流量与沿途各弧残量的最小值，
+   * 并逐弧做「正向减、反向加」的残量记账（共享无向边反向弧即回退通道）。
+   * 长链管网（如上万节点单链）的增广路径深度不再受 JS 调用栈限制。
+   */
+  private dfs(s: number, t: number, pushed: number): number {
+    const path: number[] = [];
+    let u = s;
+    // 下行至汇点；无可用弧时逐层回溯，退回源点且源点也搜尽则本相位结束
+    while (u !== t) {
+      let advanced = false;
+      while (this.it[u] !== -1) {
+        const a = this.it[u];
+        const v = this.to[a];
+        if (this.cap[a] > 0 && this.level[v] === this.level[u] + 1) {
+          path.push(a);
+          u = v;
+          advanced = true;
+          break;
         }
+        this.it[u] = this.next[a];
       }
-      this.it[u] = this.next[a];
+      if (!advanced) {
+        if (path.length === 0) return 0; // 源点已无可用弧
+        const a = path.pop()!;
+        u = this.from[a];
+        this.it[u] = this.next[a]; // 该弧下游已搜尽，本相位不再考虑
+      }
     }
-    return 0;
+    // 瓶颈 = 入口流量与沿途各弧残量的最小值（沿途弧残量均 > 0，故 flow > 0）
+    let flow = pushed;
+    for (const a of path) {
+      if (this.cap[a] < flow) flow = this.cap[a];
+    }
+    for (const a of path) {
+      this.cap[a] -= flow;
+      this.cap[a ^ 1] += flow;
+    }
+    return flow;
   }
 
   maxFlow(s: number, t: number): number {

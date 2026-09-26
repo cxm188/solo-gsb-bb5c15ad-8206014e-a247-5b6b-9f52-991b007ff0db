@@ -345,6 +345,58 @@ const c7 = solver.verifyCapacity(ringNet2, {
 });
 check('环路两路径 + 两并行出口管 → 获配 2', c7.totalAllocated === 2 && c7.cutCapacity === 2);
 
+console.log('核验：长链管网（14000 节点单链，回归：增广搜索不得依赖调用栈深度）：');
+// 回归场景：增广搜索曾按增广路径深度递归，14000 节点单链上递归深度约 14000，
+// 超出 JS 调用栈抛出 RangeError（Maximum call stack size exceeded），
+// 页面无法给出应为 1 的获配量。改为显式栈迭代实现后必须正常求解。
+const LONG_CHAIN_N = 14000;
+const longChainNet = {
+  nodes: Array.from({ length: LONG_CHAIN_N }, (_, i) => `N${i}`),
+  pipes: Array.from({ length: LONG_CHAIN_N - 1 }, (_, i) => ({ id: `P${i}`, from: `N${i}`, to: `N${i + 1}` })),
+  valvedPipes: [],
+};
+const longChainQuery = {
+  supplies: ['N0'],
+  outlets: [`N${LONG_CHAIN_N - 1}`],
+  supplyCaps: { N0: 1 },
+  outletDemands: { [`N${LONG_CHAIN_N - 1}`]: 1 },
+};
+const cl1 = solver.verifyCapacity(longChainNet, longChainQuery);
+check('14000 节点单链核验返回 ok（不抛 RangeError）', cl1.status === 'ok');
+check('14000 节点单链首端供给 1、末端获配 1 且足额', cl1.status === 'ok' &&
+  cl1.totalAllocated === 1 && cl1.totalShortfall === 0 &&
+  capRow(cl1, `N${LONG_CHAIN_N - 1}`).allocated === 1 && capRow(cl1, `N${LONG_CHAIN_N - 1}`).fullySupplied);
+check('14000 节点单链最小割为首端供给上限（容量合计 1）', cl1.status === 'ok' &&
+  cl1.cutCapacity === 1 && cl1.cutItems.length === 1 &&
+  cl1.cutItems[0].kind === 'supply' && cl1.cutItems[0].id === 'N0' && cl1.cutItems[0].capacity === 1);
+
+console.log('核验：需要残量改派的小图（回归：反向残量弧回退既有占用）：');
+// 管段插入顺序使 Dinic 第一阶段增广沿 S→A→B→T1 占住共享管段 A—B；
+// 第二阶段必须经 B→A 反向残量弧回退该占用，走出 S→C→B→A→D→T2 才能达到
+// 最大流 2。若残量回退记账损坏，总获配会停在 1。
+const rerouteCapNet = {
+  nodes: ['S', 'A', 'C', 'B', 'D', 'T1', 'T2'],
+  pipes: [
+    { id: 'eSC', from: 'S', to: 'C' },
+    { id: 'eAD', from: 'A', to: 'D' },
+    { id: 'eSA', from: 'S', to: 'A' },
+    { id: 'eAB', from: 'A', to: 'B' },
+    { id: 'eCB', from: 'C', to: 'B' },
+    { id: 'eBT', from: 'B', to: 'T1' },
+    { id: 'eDT', from: 'D', to: 'T2' },
+  ],
+  valvedPipes: [],
+};
+const rr1 = solver.verifyCapacity(rerouteCapNet, {
+  supplies: ['S'], outlets: ['T1', 'T2'],
+  supplyCaps: { S: 2 }, outletDemands: { T1: 1, T2: 1 },
+});
+check('残量改派后总获配达到 2（两个出口均足额）', rr1.status === 'ok' &&
+  rr1.totalAllocated === 2 && rr1.totalShortfall === 0 && rr1.rows.every((x) => x.fullySupplied));
+check('残量改派场景最小割为供给上限（容量合计 2）', rr1.status === 'ok' &&
+  rr1.cutCapacity === 2 && rr1.cutItems.length === 1 &&
+  rr1.cutItems[0].kind === 'supply' && rr1.cutItems[0].id === 'S' && rr1.cutItems[0].capacity === 2);
+
 console.log('核验：零上限 / 零需求：');
 const c8 = cap(['S1', 'S2'], ['B', 'C'], { S1: 0, S2: 0 }, { B: 2, C: 2 });
 check('供给上限全为 0 时获配 0', c8.totalAllocated === 0);
@@ -580,6 +632,23 @@ check('第一级重点 P 获配 1', p3.priorityAllocated === 1 && prioRow(p3, 'P
 check('第二级经改派后普通 C 也获配 1（无虚假缺口）', prioRow(p3, 'C').allocated === 1);
 check('总获配为 2，与无重点普通核验一致', p3.totalAllocated === 2 && p3.totalAllocated === p3plain.totalAllocated);
 check('两个出口均足额、总缺口 0', p3.totalShortfall === 0 && p3.rows.every((x) => x.fullySupplied));
+
+console.log('优先配水：长链管网两阶段（回归：复用同一迭代增广搜索）：');
+// 14000 节点单链（longChainNet）：首端供给 2，链中点普通出口需求 1、末端重点出口需求 1。
+// 每段管共享容量 1，全链只能通 1：第一阶段重点（末端）获配 1 占满全链，
+// 第二阶段普通（中点）无残量可用、获配 0。
+const clp = solver.verifyPriorityCapacity(longChainNet, {
+  supplies: ['N0'],
+  outlets: [`N${LONG_CHAIN_N / 2}`, `N${LONG_CHAIN_N - 1}`],
+  priorityOutlets: [`N${LONG_CHAIN_N - 1}`],
+  supplyCaps: { N0: 2 },
+  outletDemands: { [`N${LONG_CHAIN_N / 2}`]: 1, [`N${LONG_CHAIN_N - 1}`]: 1 },
+});
+check('长链重点优先配水返回 ok（不抛 RangeError）', clp.status === 'ok');
+check('长链第一阶段末端重点出口获配 1', clp.status === 'ok' &&
+  clp.priorityAllocated === 1 && prioRow(clp, `N${LONG_CHAIN_N - 1}`).allocated === 1);
+check('长链第二阶段中点普通出口获配 0、总获配 1', clp.status === 'ok' &&
+  prioRow(clp, `N${LONG_CHAIN_N / 2}`).allocated === 0 && clp.totalAllocated === 1);
 
 console.log('优先配水：重点本身无法足额时：');
 const p4net = {
